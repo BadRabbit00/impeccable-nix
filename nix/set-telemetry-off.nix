@@ -6,11 +6,18 @@ writeShellApplication {
   text = ''
     # usage: impeccable-telemetry-off <config.json>
     cfg=$1
-    mkdir -p "$(dirname "$cfg")"
-    [ -e "$cfg" ] || echo '{}' > "$cfg"
+    ${import ./guard.nix}
+    safe_target "$cfg" || exit 0
+
+    if [ -e "$cfg" ] || [ -L "$cfg" ]; then
+      cfg=$(readlink -f "$cfg")
+    else
+      mkdir -p "$(dirname "$cfg")"
+      (umask 077; echo '{}' > "$cfg")
+    fi
 
     # Чужой/битый файл и явное решение пользователя не трогаем.
-    jq -e 'type == "object" and (has("telemetry") | not)' "$cfg" >/dev/null 2>&1 || exit 0
+    jq -s -e 'length == 1 and (.[0] | type) == "object" and (.[0] | has("telemetry") | not)' "$cfg" >/dev/null 2>&1 || exit 0
 
     tmp=$(mktemp "$cfg.XXXXXX")
     trap 'rm -f "$tmp"' EXIT
