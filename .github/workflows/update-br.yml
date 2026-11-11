@@ -1,0 +1,116 @@
+name: update-br
+
+# Weekly `nix flake update`. If the updated lock builds and passes
+# `nix flake check`, open/update a PR on chore/flake-update. If anything fails
+# the workflow fails and NO PR is opened, so main stays green.
+#
+# PRs created with GITHUB_TOKEN do not trigger other workflows, so ci-br does
+# not run on that PR; the build and checks happen here instead.
+# The PR step is a separate job so only it gets write permissions.
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: update, build and check
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          github_access_token: ${{ github.token }}
+      - name: Record old state
+        run: |
+          {
+            echo "OLD_REV=$(jq -r '.nodes["impeccable-src"].locked.rev' flake.lock)"
+            echo "OLD_VERSION=$(nix eval --raw .#packages.x86_64-linux.impeccable.version)"
+          } >> "$GITHUB_ENV"
+      - name: nix flake update
+        run: nix flake update
+      - name: Stop if the lock did not change
+        id: diff
+        run: |
+          if git diff --quiet -- flake.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: nix flake check
+        if: steps.diff.outputs.changed == 'true'
+        run: nix flake check --print-build-logs --keep-going
+      - name: Evaluate all systems (no build)
+        if: steps.diff.outputs.changed == 'true'
+        run: nix flake check --no-build --all-systems
+      - name: Write PR body
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          new_rev=$(jq -r '.nodes["impeccable-src"].locked.rev' flake.lock)
+          new_version=$(nix eval --raw .#packages.x86_64-linux.impeccable.version)
+          {
+            echo "Automated \`nix flake update\`. The build and \`nix flake check\` passed in the workflow run that created this PR."
+            echo
+            echo "- impeccable-src: \`${OLD_REV}\` -> \`${new_rev}\`"
+            echo "- impeccable version: \`${OLD_VERSION}\` -> \`${new_version}\`"
+            echo
+            echo "Lock changes:"
+            echo
+            echo '```'
+            git diff --stat -- flake.lock
+            echo '```'
+          } > pr-body.md
+          cat pr-body.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.diff.outputs.changed == 'true'
+        with:
+          name: flake-update
+          path: |
+            flake.lock
+            pr-body.md
+          if-no-files-found: error
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+
+  pull-request:
+    name: open/update PR
+    needs: update
+    if: needs.update.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: flake-update
+          path: ${{ runner.temp }}/flake-update
+      - name: Place the updated lock
+        env:
+          SRC: ${{ runner.temp }}/flake-update
+        run: cp "${SRC}/flake.lock" flake.lock
+      - uses: peter-evans/create-pull-request@15733dbdfeedb4f7fdb73d13c6f5ac83b710fab8 # v8.1.2
+        with:
+          token: ${{ github.token }}
+          branch: chore/flake-update
+          add-paths: flake.lock
+          commit-message: "chore: update flake.lock"
+          title: "chore: update flake.lock"
+          body-path: ${{ runner.temp }}/flake-update/pr-body.md
+          delete-branch: true
