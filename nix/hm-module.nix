@@ -12,12 +12,15 @@ let
   home = config.home.homeDirectory;
 
   # Модуль programs.claude-code есть не во всех версиях Home Manager.
-  hmClaude = options ? programs.claude-code && config.programs.claude-code.enable;
+  hasClaudeOpt = options ? programs.claude-code;
+  hmClaude = hasClaudeOpt && config.programs.claude-code.enable;
+  # configDir тоже есть не во всех версиях модуля.
+  hmClaudeDir = hmClaude && options ? programs.claude-code.configDir;
 
   rawDir =
     if cfg.claudeConfigDir != null then
       cfg.claudeConfigDir
-    else if hmClaude then
+    else if hmClaudeDir then
       config.programs.claude-code.configDir
     else
       ".claude";
@@ -29,7 +32,7 @@ let
   # Значение попадает в шелл-скрипты активации: никаких кавычек, $, `, \ и ..
   dirOk =
     trimmed != ""
-    && builtins.match "[^'\"$`\\\\]+" trimmed != null
+    && builtins.match "[^'\"$`\\\\[:cntrl:]]+" trimmed != null
     && !(lib.hasInfix ".." trimmed)
     && !(lib.hasInfix "//" trimmed);
 
@@ -63,7 +66,7 @@ in
         Claude Code config directory: relative to $HOME or absolute. When null,
         `programs.claude-code.configDir` is used if that Home Manager module is
         enabled, and `.claude` otherwise. Quotes, `$`, backticks, backslashes,
-        `..` and `//` are rejected.
+        control characters, `..` and `//` are rejected.
       '';
     };
 
@@ -96,54 +99,58 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable (
-    lib.mkMerge [
-      {
-        assertions = [
-          {
-            assertion = dirOk;
-            message = "programs.impeccable.claudeConfigDir (or programs.claude-code.configDir) must be non-empty and contain no quotes, $, backticks, backslashes, '..' or '//': ${rawDir}";
-          }
-        ];
-        home.file."${relDir}/skills/impeccable".source = "${cfg.package}/${cfg.package.skillDir}";
-      }
-
-      (lib.mkIf cfg.agents.enable {
-        # recursive: каталог агентов остаётся общим с пользовательскими агентами.
-        home.file."${relDir}/agents" = {
-          source = "${cfg.package}/${cfg.package.agentsDir}";
-          recursive = true;
-        };
-      })
-
-      # Файл ведёт Home Manager (симлинк в стор): правим его декларативно, а не активацией.
-      (lib.mkIf (cfg.hooks.enable && hmClaude) {
-        programs.claude-code.settings.hooks = {
-          PostToolUse = [
+  config = lib.mkMerge [
+    (lib.mkIf cfg.enable (
+      lib.mkMerge [
+        {
+          assertions = [
             {
-              matcher = "Edit|Write";
-              hooks = [ (hookEntry 5 "Checking UI changes") ];
+              assertion = dirOk;
+              message = "programs.impeccable.claudeConfigDir (or programs.claude-code.configDir) must be non-empty and contain no quotes, $, backticks, backslashes, control characters, '..' or '//': ${rawDir}";
             }
           ];
-          Stop = [ { hooks = [ (hookEntry 30 "Design deep pass") ]; } ];
-        };
-      })
+          home.file."${relDir}/skills/impeccable".source = "${cfg.package}/${cfg.package.skillDir}";
+        }
 
-      (lib.mkIf (cfg.hooks.enable && !hmClaude) {
-        # settings.json пишет сам Claude Code, поэтому не home.file, а слияние;
-        # после linkGeneration, чтобы видеть итоговые ссылки HM.
-        home.activation.impeccableHooks = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
-          run ${lib.getExe mergeHooks} ${lib.escapeShellArg "${absDir}/settings.json"} ${lib.escapeShellArg launcher}
-        '';
-      })
+        (lib.mkIf cfg.agents.enable {
+          # recursive: каталог агентов остаётся общим с пользовательскими агентами.
+          home.file."${relDir}/agents" = {
+            source = "${cfg.package}/${cfg.package.agentsDir}";
+            recursive = true;
+          };
+        })
 
-      (lib.mkIf (!cfg.telemetry.enable) {
-        # Переменная окружения не дойдёт до хуков, если Claude Code запущен не
-        # из сессии с home.sessionVariables; файл читает сам движок всегда.
-        home.activation.impeccableTelemetryOff = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
-          run ${lib.getExe telemetryOff} ${lib.escapeShellArg "${home}/.impeccable/config.json"}
-        '';
-      })
-    ]
-  );
+        (lib.mkIf (cfg.hooks.enable && !hmClaude) {
+          # settings.json пишет сам Claude Code, поэтому не home.file, а слияние;
+          # после linkGeneration, чтобы видеть итоговые ссылки HM.
+          home.activation.impeccableHooks = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
+            run ${lib.getExe mergeHooks} ${lib.escapeShellArg "${absDir}/settings.json"} ${lib.escapeShellArg launcher}
+          '';
+        })
+
+        (lib.mkIf (!cfg.telemetry.enable) {
+          # Переменная окружения не дойдёт до хуков, если Claude Code запущен не
+          # из сессии с home.sessionVariables; файл читает сам движок всегда.
+          home.activation.impeccableTelemetryOff = lib.hm.dag.entryAfter [ "linkGeneration" ] ''
+            run ${lib.getExe telemetryOff} ${lib.escapeShellArg "${home}/.impeccable/config.json"}
+          '';
+        })
+      ]
+    ))
+
+    # Файл ведёт Home Manager (симлинк в стор): правим его декларативно, а не
+    # активацией. Определение programs.claude-code ломает eval там, где опции
+    # нет, даже под mkIf false, поэтому блок добавляется только при её наличии.
+    (lib.optionalAttrs hasClaudeOpt {
+      programs.claude-code.settings.hooks = lib.mkIf (cfg.enable && cfg.hooks.enable && hmClaude) {
+        PostToolUse = [
+          {
+            matcher = "Edit|Write";
+            hooks = [ (hookEntry 5 "Checking UI changes") ];
+          }
+        ];
+        Stop = [ { hooks = [ (hookEntry 30 "Design deep pass") ]; } ];
+      };
+    })
+  ];
 }

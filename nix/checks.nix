@@ -49,14 +49,86 @@ let
     };
   };
 
-  hmBad = mkHm {
-    programs.impeccable = {
-      enable = true;
-      claudeConfigDir = "x'; touch /tmp/pwned; '";
+  # HM без programs.claude-code (старые версии): модуль не должен ломать eval.
+  noClaudeBase = {
+    # worktrunk тоже определяет programs.claude-code, без объявления это ошибка.
+    disabledModules = [
+      "${home-manager}/modules/programs/claude-code"
+      "${home-manager}/modules/programs/worktrunk.nix"
+    ];
+    home = {
+      username = "tester";
+      homeDirectory = "/home/tester";
+      stateVersion = "25.05";
     };
   };
-  # Утверждение модуля обрывает eval: tryEval ловит throw.
-  badDirRejected = !(builtins.tryEval hmBad.activationPackage.drvPath).success;
+  hmNoClaudeOff = home-manager.lib.homeManagerConfiguration {
+    inherit pkgs;
+    modules = [
+      self.homeManagerModules.default
+      noClaudeBase
+      { programs.impeccable.enable = false; }
+    ];
+  };
+  hmNoClaudeOn = home-manager.lib.homeManagerConfiguration {
+    inherit pkgs;
+    modules = [
+      self.homeManagerModules.default
+      noClaudeBase
+      {
+        programs.impeccable = {
+          enable = true;
+          hooks.enable = true;
+        };
+      }
+    ];
+  };
+
+  # Сырой eval HM без обёртки moduleChecks: та бросает на первом же упавшем
+  # утверждении, а нам нужно прочитать список утверждений и проверить именно dirOk.
+  hmLib = import "${home-manager}/modules/lib/stdlib-extended.nix" lib;
+  rawAssertions =
+    extra:
+    (hmLib.evalModules {
+      class = "homeManager";
+      specialArgs.modulesPath = "${home-manager}/modules";
+      modules = [
+        self.homeManagerModules.default
+        {
+          home = {
+            username = "tester";
+            homeDirectory = "/home/tester";
+            stateVersion = "25.05";
+          };
+          nixpkgs.config = lib.mkDefault pkgs.config;
+        }
+        extra
+      ]
+      ++ import "${home-manager}/modules/modules.nix" {
+        inherit pkgs;
+        lib = hmLib;
+        check = true;
+        minimal = false;
+      };
+    }).config.assertions;
+
+  # Проверяется именно утверждение dirOk, а не любая ошибка eval.
+  dirRejected =
+    dir:
+    builtins.any (a: !a.assertion && lib.hasInfix "claudeConfigDir" a.message) (rawAssertions {
+      programs.impeccable = {
+        enable = true;
+        claudeConfigDir = dir;
+      };
+    });
+  badDirsRejected = lib.all dirRejected [
+    "x'; touch /tmp/pwned; '"
+    "x\ny"
+    "x\ty"
+    "../x"
+    ""
+  ];
+  goodDirAccepted = !(dirRejected ".config/claude") && !(dirRejected "/home/tester/.claude");
 
   fakeEngine = pkgs.writeShellScript "fake-engine" ''
     echo "pro=$IMPECCABLE_PRO agent=$IMPECCABLE_LIVE_COPY_AGENT upd=$IMPECCABLE_NO_UPDATE_CHECK"
@@ -100,8 +172,9 @@ in
         [ "$(${pkgs.dash}/bin/dash $TMPDIR/skill/scripts/impeccable engine-probe)" = "$probe" ]
 
         # Экспортируемые дефолты и их переопределение (движок подменён заглушкой).
+        # IMPECCABLE_PRO не переопределяем: Pro всё равно отключён непустым IMPECCABLE_BIN.
         [ "$(IMPECCABLE_BIN=${fakeEngine} ${pkgs.dash}/bin/dash ${launcher})" = "pro=off agent=chat upd=1" ]
-        [ "$(IMPECCABLE_BIN=${fakeEngine} IMPECCABLE_LIVE_COPY_AGENT=codex IMPECCABLE_PRO=on IMPECCABLE_NO_UPDATE_CHECK= ${pkgs.dash}/bin/dash ${launcher})" = "pro=on agent=codex upd=" ]
+        [ "$(IMPECCABLE_BIN=${fakeEngine} IMPECCABLE_LIVE_COPY_AGENT=codex IMPECCABLE_NO_UPDATE_CHECK= ${pkgs.dash}/bin/dash ${launcher})" = "pro=off agent=codex upd=" ]
 
         # Реальная команда скилла (SKILL.md запускает `context`).
         ${pkgs.dash}/bin/dash ${launcher} context > context.out 2> context.err || {
@@ -131,10 +204,10 @@ in
         # Слияние: чужие ключи/хуки живут, старая запись заменена, повтор идемпотентен,
         # пустые группы пользователя на чужих событиях сохраняются.
         cat > s.json <<'JSON'
-        {"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}],
+        {"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"},{"type":"prompt","prompt":"x"}]}],
          "Notification":[],
          "SessionStart":[{"hooks":[]}],
-         "PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"[ ! -f '/old/skills/impeccable/scripts/impeccable' ] || '/old/skills/impeccable/scripts/impeccable' hook"}]}]}}
+         "PostToolUse":[{"matcher":"Edit","hooks":[{"type":"prompt","prompt":"p"},{"type":"command","command":"[ ! -f '/old/skills/impeccable/scripts/impeccable' ] || '/old/skills/impeccable/scripts/impeccable' hook"}]}]}}
         JSON
         $M s.json $L
         cp s.json first.json
@@ -142,11 +215,13 @@ in
         cmp s.json first.json
         jq -e '.model == "opus"
           and (.hooks.Stop | length == 2)
-          and (.hooks.PostToolUse | length == 1)
+          and (.hooks.PostToolUse | length == 2)
           and (.hooks.Notification == [])
           and (.hooks.SessionStart == [{"hooks":[]}])
-          and ([.hooks[][].hooks[].command | select(contains("impeccable"))] | length == 2)
-          and (.hooks.Stop[0].hooks[0].command == "echo mine")' s.json
+          and ([.hooks[][].hooks[] | (.command // "") | select(contains("impeccable"))] | length == 2)
+          and (.hooks.Stop[0].hooks[0].command == "echo mine")
+          and (.hooks.Stop[0].hooks[1] == {"type":"prompt","prompt":"x"})
+          and (.hooks.PostToolUse[0].hooks[0] == {"type":"prompt","prompt":"p"})' s.json
 
         # Событие, опустевшее только из-за нашего удаления, пропадает.
         echo '{"hooks":{"Old":[{"hooks":[{"type":"command","command":"[ ! -f '"'"'/x/skills/impeccable/scripts/impeccable'"'"' ] || '"'"'/x/skills/impeccable/scripts/impeccable'"'"' hook"}]}]}}' > o.json
@@ -228,7 +303,24 @@ in
       $g2/home-files/.claude/settings.json
 
     # Небезопасный claudeConfigDir отвергается утверждением модуля.
-    ${if badDirRejected then "true" else "echo 'missing dir assertion'; exit 1"}
+    ${if badDirsRejected && goodDirAccepted then "true" else "echo 'dir assertion wrong'; exit 1"}
+
+    # HM без programs.claude-code: eval проходит и без модуля, и с хуками через активацию.
+    ${
+      if hmNoClaudeOff.options.programs ? claude-code then
+        "echo 'claude-code not disabled'; exit 1"
+      else
+        "true"
+    }
+    ${
+      if hmNoClaudeOn.options.programs ? claude-code then
+        "echo 'claude-code not disabled'; exit 1"
+      else
+        "true"
+    }
+    test -e ${hmNoClaudeOff.activationPackage}/activate
+    grep -q impeccable-merge-hooks ${hmNoClaudeOn.activationPackage}/activate
+    test -e ${hmNoClaudeOn.activationPackage}/home-files/.claude/skills/impeccable/SKILL.md
     touch $out
   '';
 }

@@ -36,8 +36,8 @@ writeShellApplication {
     # store-путём или записанную самим движком) заменяем, чужие хуки оставляем.
     # Пустыми удаляем только группы и события, опустевшие из-за нашего удаления.
     jq --arg cmd "$cmd" '
-      def isours: type == "object" and ((.command? // "") | type == "string")
-        and (.command | contains("/skills/impeccable/scripts/impeccable") and endswith(" hook"));
+      def isours: type == "object" and ((.command? // "") as $c | ($c | type) == "string"
+        and ($c | contains("/skills/impeccable/scripts/impeccable")) and ($c | endswith(" hook")));
       def hasours: type == "object" and ((.hooks // []) | type) == "array" and any(.hooks[]?; isours);
       def clean: map(if hasours then (.hooks |= map(select(isours | not))) | select((.hooks | length) > 0) else . end);
       def hook($t; $msg): { type: "command", command: $cmd, timeout: $t, statusMessage: $msg };
