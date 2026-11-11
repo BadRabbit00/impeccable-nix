@@ -21,7 +21,7 @@ agents/*.md             the four subagents
 LICENSE, NOTICE.md      upstream license and notices
 ```
 
-Supported systems: `x86_64-linux`, `aarch64-linux` (built and checked on x86_64-linux). The darwin outputs use the same rules but are untested.
+Supported systems: `x86_64-linux`, `aarch64-linux` (built and checked on x86_64-linux), `aarch64-darwin` (untested). The darwin output uses the same rules. `x86_64-darwin` is not supported: nixpkgs 26.11 dropped it.
 
 ## Usage
 
