@@ -30,7 +30,6 @@
         "x86_64-linux"
         "aarch64-linux"
         # darwin собирается по тем же правилам, но здесь не проверялось.
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
